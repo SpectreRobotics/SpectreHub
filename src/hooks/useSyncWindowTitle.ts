@@ -19,11 +19,11 @@ export function useSyncWindowTitle() {
       try {
         if (isTauri()) {
           const version = await getVersion();
-          const title = `Reflect ${version}`;
+          const title = `SpectreHub ${version}`;
           await getCurrentWindow().setTitle(name ? `${title} — ${name}` : title);
         } else {
           const version = __APP_VERSION__;
-          const title = `Reflect ${version}`;
+          const title = `SpectreHub ${version}`;
           document.title = name ? `${title} — ${name}` : title;
         }
       } catch (exception) {

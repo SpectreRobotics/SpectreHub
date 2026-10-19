@@ -34,8 +34,13 @@ export default defineConfig(async () => ({
   // to access the Tauri environment variables set by the CLI with information about the current target
   envPrefix: ["VITE_", "TAURI_"],
   build: {
-    // Tauri uses Chromium on Windows and WebKit on macOS and Linux
-    target: process.env.TAURI_ENV_PLATFORM == "windows" ? "chrome105" : "safari13",
+    // Tauri uses Chromium on Windows and WebKit on macOS and Linux; default to modern es2022 for web builds
+    target:
+      process.env.TAURI_ENV_PLATFORM == "windows"
+        ? "chrome105"
+        : process.env.TAURI_ENV_PLATFORM
+          ? "safari15"
+          : "es2022",
     // don't minify for debug builds
     minify: !process.env.TAURI_ENV_DEBUG ? "esbuild" : false,
     // produce sourcemaps for debug builds

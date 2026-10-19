@@ -1,0 +1,698 @@
+/**
+ * =============================================================================
+ * PROFILE.JSX - User Profile Page
+ * =============================================================================
+ * 
+ * WHAT IS THIS PAGE?
+ * Displays and allows editing of user profile information:
+ * - Display name
+ * - Email (read-only)
+ * - Scouting statistics
+ * - Account info
+ * 
+ * =============================================================================
+ */
+
+import { useState, useEffect } from 'react';
+import { Helmet } from 'react-helmet-async';
+import { useAuth } from '../contexts/AuthContext';
+import { getAllScoutingData } from '../services/scoutingService';
+import { getTeamMembers, regenerateTeamCode, getTeamLeadCode, generateTeamCode, validateTeamCode, linkMemberToTeam } from '../services/teamCodeService';
+import { getUserSettings, saveUserSettings, isMobileDevice } from '../services/userSettingsService';
+import TeamSharing from '../components/TeamSharing';
+
+export default function Profile() {
+  const { user, userProfile, isAdmin, roleContext, updateUserProfile, refreshRoleContext } = useAuth();
+
+  // ==========================================================================
+  // STATE
+  // ==========================================================================
+
+  const [displayName, setDisplayName] = useState(userProfile?.displayName || user?.displayName || '');
+  const [teamNumber, setTeamNumber] = useState(userProfile?.teamNumber || '');
+  const [stats, setStats] = useState({ entries: 0, teams: 0 });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [success, setSuccess] = useState('');
+  const [error, setError] = useState('');
+
+  // Team Admin state (for Team Leads only)
+  const [teamMembers, setTeamMembers] = useState([]);
+  const [teamCode, setTeamCode] = useState('');
+  const [loadingTeam, setLoadingTeam] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [teamStats, setTeamStats] = useState({ members: 0, totalEntries: 0 });
+
+  // Team Lead toggle state
+  const [isTogglingTeamLead, setIsTogglingTeamLead] = useState(false);
+
+  // Join Team state (for non-Team-Leads)
+  const [joinTeamCode, setJoinTeamCode] = useState('');
+  const [joiningTeam, setJoiningTeam] = useState(false);
+
+  // User Settings state
+  const [userSettings, setUserSettings] = useState({
+    largeButtonMode: false,
+    theme: 'default',
+    offlineEnabled: true
+  });
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  // Update form when userProfile loads
+  useEffect(() => {
+    if (userProfile) {
+      setDisplayName(userProfile.displayName || user?.displayName || '');
+      setTeamNumber(userProfile.teamNumber || '');
+    }
+  }, [userProfile, user]);
+
+  // ==========================================================================
+  // LOAD USER SETTINGS
+  // ==========================================================================
+
+  useEffect(() => {
+    loadUserSettings();
+  }, [user]);
+
+  const loadUserSettings = async () => {
+    if (!user?.id) return;
+    try {
+      const settings = await getUserSettings(user.id);
+      setUserSettings(settings);
+      // Apply settings to body
+      applySettings(settings);
+    } catch (err) {
+      console.error('Error loading user settings:', err);
+      // Apply default based on device
+      const defaultLargeButton = isMobileDevice();
+      setUserSettings(prev => ({ ...prev, largeButtonMode: defaultLargeButton }));
+      applySettings({ largeButtonMode: defaultLargeButton, theme: 'default' });
+    }
+  };
+
+  const applySettings = (settings) => {
+    // Apply large button mode
+    if (settings.largeButtonMode) {
+      document.body.classList.add('large-button-mode');
+    } else {
+      document.body.classList.remove('large-button-mode');
+    }
+    // Apply theme
+    document.body.classList.remove('theme-frc-red', 'theme-frc-blue', 'theme-high-contrast');
+    if (settings.theme && settings.theme !== 'default') {
+      document.body.classList.add(`theme-${settings.theme.replace('_', '-')}`);
+    }
+  };
+
+  const handleSettingChange = async (key, value) => {
+    if (!user?.id) return;
+    setSavingSettings(true);
+    try {
+      const newSettings = { ...userSettings, [key]: value };
+      setUserSettings(newSettings);
+      applySettings(newSettings);
+      await saveUserSettings(user.id, newSettings);
+    } catch (err) {
+      console.error('Error saving settings:', err);
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  // ==========================================================================
+  // LOAD USER STATS
+  // ==========================================================================
+
+  useEffect(() => {
+    loadStats();
+  }, [user, roleContext]);
+
+  const loadStats = async () => {
+    if (!user || !roleContext?.userUid) return;
+
+    try {
+      // Pass roleContext to get only the entries the user has access to
+      // For Profile page, we want to show the user's own stats regardless of role
+      // So we filter by scouterUid after getting accessible data
+      const allData = await getAllScoutingData(roleContext);
+      const userEntries = allData.filter(e => e.scouterUid === user.uid);
+
+      setStats({
+        entries: userEntries.length,
+        teams: new Set(userEntries.map(e => e.teamNumber)).size
+      });
+
+      // If Team Lead, also calculate team stats
+      if (roleContext.isTeamLead) {
+        setTeamStats({
+          members: teamMembers.length,
+          totalEntries: allData.length
+        });
+      }
+    } catch (err) {
+      console.error('Error loading stats:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ==========================================================================
+  // LOAD TEAM DATA (Team Leads only)
+  // ==========================================================================
+
+  useEffect(() => {
+    if (roleContext?.isTeamLead && user) {
+      loadTeamData();
+    }
+  }, [roleContext?.isTeamLead, user]);
+
+  const loadTeamData = async () => {
+    if (!user || !roleContext?.isTeamLead) return;
+    setLoadingTeam(true);
+
+    try {
+      // Get team code
+      const code = await getTeamLeadCode(user.id);
+      setTeamCode(code || roleContext.teamCode || '');
+
+      // Get team members
+      const members = await getTeamMembers(user.id);
+      setTeamMembers(members);
+
+      // Update team stats
+      const allData = await getAllScoutingData(roleContext);
+      setTeamStats({
+        members: members.length,
+        totalEntries: allData.length
+      });
+    } catch (err) {
+      console.error('Error loading team data:', err);
+    } finally {
+      setLoadingTeam(false);
+    }
+  };
+
+  // Handle regenerating team code
+  const handleRegenerateCode = async () => {
+    if (!confirm('Are you sure you want to regenerate your team code? The old code will stop working.')) {
+      return;
+    }
+
+    setRegenerating(true);
+    setError('');
+
+    try {
+      const newCode = await regenerateTeamCode(user.id, user.email);
+      setTeamCode(newCode);
+      setSuccess('Team code regenerated successfully!');
+    } catch (err) {
+      console.error('Error regenerating code:', err);
+      setError('Failed to regenerate team code. Please try again.');
+    } finally {
+      setRegenerating(false);
+    }
+  };
+
+  // ==========================================================================
+  // UPDATE PROFILE
+  // ==========================================================================
+
+  const handleSave = async (e) => {
+    e.preventDefault();
+    if (!displayName.trim()) {
+      setError('Display name is required');
+      return;
+    }
+
+    // Validate team number if provided
+    const teamNum = teamNumber ? parseInt(teamNumber, 10) : null;
+    if (teamNumber && (isNaN(teamNum) || teamNum < 1 || teamNum > 99999)) {
+      setError('Please enter a valid team number (1-99999)');
+      return;
+    }
+
+    setSaving(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      // Update Supabase profile with display name and team number
+      const updates = {
+        displayName: displayName.trim()
+      };
+      if (teamNum) {
+        updates.teamNumber = teamNum;
+      } else {
+        updates.teamNumber = null; // Clear team number if empty
+      }
+
+      await updateUserProfile(updates);
+
+      setSuccess('Profile updated successfully!');
+    } catch (err) {
+      console.error('Error updating profile:', err);
+      setError('Failed to update profile');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // ==========================================================================
+  // TEAM LEAD TOGGLE
+  // ==========================================================================
+
+  const handleTeamLeadToggle = async (becomeTeamLead) => {
+    // Only show confirmation when stopping being a team lead
+    if (!becomeTeamLead) {
+      if (!confirm('Are you sure you want to stop being a team lead? You will lose access to team management features.')) {
+        return;
+      }
+    }
+
+    setIsTogglingTeamLead(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      if (becomeTeamLead) {
+        // Becoming a Team Lead - generate team code
+        // The generateTeamCode function now throws if profile update fails
+        const generatedCode = await generateTeamCode(user.id, user.email);
+
+        // Set the code immediately so it's visible in the UI
+        setTeamCode(generatedCode);
+
+        // Refresh role context to update isTeamLead flag
+        await refreshRoleContext();
+
+        // Load full team data (members, etc.)
+        await loadTeamData();
+
+        setSuccess(`You are now a Team Lead! Your team code is: ${generatedCode}`);
+      } else {
+        // Removing Team Lead status
+        await updateUserProfile({ isTeamLead: false, teamLeadUid: null, teamCode: null });
+        await refreshRoleContext();
+        setTeamCode('');
+        setTeamMembers([]);
+        setSuccess('Team Lead status removed.');
+      }
+    } catch (err) {
+      console.error('Error toggling team lead:', err);
+      setError(err.message || 'Failed to update team lead status. Please try again.');
+    } finally {
+      setIsTogglingTeamLead(false);
+    }
+  };
+
+  // Handler for joining a team (for non-Team-Leads)
+  const handleJoinTeam = async (e) => {
+    e.preventDefault();
+    if (!joinTeamCode.trim()) {
+      setError('Please enter a team code');
+      return;
+    }
+
+    setJoiningTeam(true);
+    setError('');
+    setSuccess('');
+
+    try {
+      // Validate the team code
+      const teamInfo = await validateTeamCode(joinTeamCode.trim());
+      if (!teamInfo) {
+        setError('Invalid team code. Please check with your Team Lead.');
+        return;
+      }
+
+      // Link member to team
+      await linkMemberToTeam(user.id, teamInfo.teamLeadUid, joinTeamCode.trim());
+
+      // Refresh role context to pick up new team association
+      await refreshRoleContext();
+
+      setJoinTeamCode('');
+      setSuccess(`Successfully joined the team! Team Lead: ${teamInfo.teamLeadEmail}`);
+    } catch (err) {
+      console.error('Error joining team:', err);
+      setError(err.message || 'Failed to join team. Please try again.');
+    } finally {
+      setJoiningTeam(false);
+    }
+  };
+
+  // ==========================================================================
+  // RENDER
+  // ==========================================================================
+  
+  return (
+    <>
+      <Helmet>
+        <title>Profile - PinkScout</title>
+        <meta name="description" content="Your PinkScout profile" />
+      </Helmet>
+
+      {/* Page Header */}
+      <header className="page-header">
+        <h1>👤 Your Profile</h1>
+        <p>Manage your account and view your scouting stats</p>
+      </header>
+
+      {/* Messages */}
+      {error && <div className="alert alert-error">{error}</div>}
+      {success && <div className="alert alert-success">{success}</div>}
+
+      {/* Profile Stats */}
+      <div className="stats-grid">
+        <div className="stat-card">
+          <div className="stat-value">{stats.entries}</div>
+          <div className="stat-label">Entries Submitted</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-value">{stats.teams}</div>
+          <div className="stat-label">Teams Scouted</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-value">{isAdmin ? '✅' : '❌'}</div>
+          <div className="stat-label">Admin Status</div>
+        </div>
+      </div>
+
+      {/* Account Type Toggle */}
+      <div className="content-card" style={{ marginBottom: '1.5rem' }}>
+        <h3>🔧 Account Type</h3>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '1rem' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: isTogglingTeamLead ? 'not-allowed' : 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={roleContext?.isTeamLead || false}
+              onChange={(e) => handleTeamLeadToggle(e.target.checked)}
+              disabled={isTogglingTeamLead}
+              style={{ width: '18px', height: '18px', cursor: isTogglingTeamLead ? 'not-allowed' : 'pointer' }}
+            />
+            <span style={{ fontWeight: 500 }}>Team Lead Account</span>
+          </label>
+          {isTogglingTeamLead && <span style={{ color: 'var(--text-secondary)', fontSize: '0.9rem' }}>Updating...</span>}
+        </div>
+        <small style={{ color: 'var(--text-secondary)', display: 'block', marginTop: '0.5rem' }}>
+          {roleContext?.isTeamLead
+            ? 'As a Team Lead, you can manage team members and view all team data.'
+            : 'Enable to create a team and invite members to share scouting data.'}
+        </small>
+      </div>
+
+      {/* Team Admin Section (Team Leads only) */}
+      {roleContext?.isTeamLead && (
+        <div className="content-card" style={{ borderLeft: '4px solid var(--primary)', marginBottom: '1.5rem' }}>
+          <h3>👥 Team Management</h3>
+          <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+            You are a <strong>Team Lead</strong>. Share your team code with members so they can join your team.
+          </p>
+
+          {/* Team Code Display */}
+          <div style={{
+            background: 'var(--surface-alt)',
+            padding: '1.5rem',
+            borderRadius: '8px',
+            textAlign: 'center',
+            marginBottom: '1.5rem'
+          }}>
+            <div style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
+              Your Team Code
+            </div>
+            <div style={{
+              fontSize: '2rem',
+              fontWeight: 'bold',
+              fontFamily: 'monospace',
+              letterSpacing: '0.3em',
+              color: 'var(--primary)'
+            }}>
+              {loadingTeam ? '...' : (teamCode || 'No code found')}
+            </div>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={handleRegenerateCode}
+              disabled={regenerating || loadingTeam}
+              style={{ marginTop: '1rem' }}
+            >
+              {regenerating ? 'Regenerating...' : '🔄 Regenerate Code'}
+            </button>
+            <p style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '0.5rem' }}>
+              Warning: Regenerating will invalidate the old code
+            </p>
+          </div>
+
+          {/* Team Stats */}
+          <div className="stats-grid" style={{ marginBottom: '1.5rem' }}>
+            <div className="stat-card">
+              <div className="stat-value">{loadingTeam ? '...' : teamStats.members}</div>
+              <div className="stat-label">Team Members</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-value">{loadingTeam ? '...' : teamStats.totalEntries}</div>
+              <div className="stat-label">Total Team Entries</div>
+            </div>
+          </div>
+
+          {/* Team Members List */}
+          <h4 style={{ marginBottom: '0.75rem' }}>Team Members</h4>
+          {loadingTeam ? (
+            <p style={{ color: 'var(--text-secondary)' }}>Loading team members...</p>
+          ) : teamMembers.length === 0 ? (
+            <p style={{ color: 'var(--text-secondary)' }}>
+              No members yet. Share your team code to invite scouts!
+            </p>
+          ) : (
+            <div style={{
+              background: 'var(--surface-alt)',
+              borderRadius: '8px',
+              overflow: 'hidden'
+            }}>
+              {teamMembers.map((member, index) => (
+                <div
+                  key={member.uid}
+                  style={{
+                    padding: '0.75rem 1rem',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    borderBottom: index < teamMembers.length - 1 ? '1px solid var(--border)' : 'none'
+                  }}
+                >
+                  <div>
+                    <strong>{member.displayName || 'Unnamed'}</strong>
+                    <span style={{
+                      color: 'var(--text-secondary)',
+                      fontSize: '0.85rem',
+                      marginLeft: '0.5rem'
+                    }}>
+                      {member.email}
+                    </span>
+                  </div>
+                  <span style={{
+                    fontSize: '0.75rem',
+                    color: 'var(--text-secondary)',
+                    background: 'var(--surface)',
+                    padding: '0.25rem 0.5rem',
+                    borderRadius: '4px'
+                  }}>
+                    Member
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Team Data Sharing (Team Leads only) */}
+      {roleContext?.isTeamLead && (
+        <TeamSharing userUid={user?.id} userRole={roleContext?.role} />
+      )}
+
+      {/* Join Team Section (for non-Team-Leads only) */}
+      {!roleContext?.isTeamLead && (
+        <div className="content-card" style={{ marginBottom: '1.5rem' }}>
+          <h3>🎫 Join a Team</h3>
+          {roleContext?.teamLeadUid ? (
+            <div>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: '0.5rem' }}>
+                You are a member of a team. Your scouting data is shared with your Team Lead.
+              </p>
+              <div style={{
+                background: 'var(--surface-alt)',
+                padding: '1rem',
+                borderRadius: '8px',
+                fontSize: '0.9rem',
+                color: 'var(--text-secondary)'
+              }}>
+                Team Code: <strong style={{ color: 'var(--primary)' }}>{roleContext?.teamCode || 'N/A'}</strong>
+              </div>
+            </div>
+          ) : (
+            <form onSubmit={handleJoinTeam} style={{ marginTop: '1rem' }}>
+              <p style={{ color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+                Enter your Team Lead's invite code to join their team and share scouting data.
+              </p>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <input
+                  type="text"
+                  value={joinTeamCode}
+                  onChange={(e) => setJoinTeamCode(e.target.value.toUpperCase())}
+                  placeholder="Enter 6-character code"
+                  maxLength={6}
+                  style={{
+                    flex: '1 1 150px',
+                    padding: '0.75rem 1rem',
+                    fontSize: '1.1rem',
+                    fontFamily: 'monospace',
+                    letterSpacing: '0.2em',
+                    textTransform: 'uppercase',
+                    borderRadius: '8px',
+                    border: '1px solid var(--border-color)',
+                    background: 'var(--input-bg)',
+                    color: 'var(--text-color)'
+                  }}
+                />
+                <button
+                  type="submit"
+                  className="btn btn-primary"
+                  disabled={joiningTeam || !joinTeamCode.trim()}
+                >
+                  {joiningTeam ? 'Joining...' : '🎫 Join Team'}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      )}
+
+      {/* Profile Form */}
+      <div className="content-card">
+        <h3>Account Information</h3>
+        <form onSubmit={handleSave} className="profile-form">
+          <div className="form-group">
+            <label htmlFor="email">Email Address</label>
+            <input
+              type="email"
+              id="email"
+              value={user?.email || ''}
+              disabled
+              className="input-disabled"
+            />
+            <small className="form-hint">Email cannot be changed</small>
+          </div>
+          
+          <div className="form-group">
+            <label htmlFor="displayName">Display Name</label>
+            <input
+              type="text"
+              id="displayName"
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Your scouter name"
+              minLength={2}
+              maxLength={30}
+            />
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="teamNumber">Your FRC Team Number</label>
+            <input
+              type="number"
+              id="teamNumber"
+              value={teamNumber}
+              onChange={(e) => setTeamNumber(e.target.value)}
+              placeholder="e.g. 1551"
+              min={1}
+              max={99999}
+            />
+            <small className="form-hint">
+              Set your team number to access the "My Matches" feature
+            </small>
+          </div>
+
+          <button type="submit" className="btn btn-primary" disabled={saving}>
+            {saving ? 'Saving...' : '💾 Save Changes'}
+          </button>
+        </form>
+      </div>
+
+      {/* App Settings */}
+      <div className="content-card">
+        <h3>⚙️ App Settings</h3>
+
+        {/* Large Button Mode */}
+        <div style={{ marginBottom: '1.5rem' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={userSettings.largeButtonMode}
+              onChange={(e) => handleSettingChange('largeButtonMode', e.target.checked)}
+              disabled={savingSettings}
+              style={{ width: '20px', height: '20px' }}
+            />
+            <span style={{ fontWeight: 500 }}>Large Button Mode</span>
+          </label>
+          <small style={{ color: 'var(--text-secondary)', display: 'block', marginTop: '0.5rem', marginLeft: '2rem' }}>
+            Increases button and input sizes for easier tapping on phones. Default ON for mobile devices.
+          </small>
+        </div>
+
+        {/* Theme Selection */}
+        <div style={{ marginBottom: '1.5rem' }}>
+          <label style={{ display: 'block', fontWeight: 500, marginBottom: '0.5rem' }}>
+            Theme
+          </label>
+          <select
+            value={userSettings.theme}
+            onChange={(e) => handleSettingChange('theme', e.target.value)}
+            disabled={savingSettings}
+            style={{ width: '100%', maxWidth: '250px' }}
+          >
+            <option value="default">Default (Pink)</option>
+            <option value="frc_red">FRC Red</option>
+            <option value="frc_blue">FRC Blue</option>
+            <option value="high_contrast">High Contrast</option>
+          </select>
+          <small style={{ color: 'var(--text-secondary)', display: 'block', marginTop: '0.5rem' }}>
+            Choose a color theme for the app.
+          </small>
+        </div>
+
+        {savingSettings && (
+          <small style={{ color: 'var(--primary-color)' }}>Saving settings...</small>
+        )}
+      </div>
+
+      {/* Account Details */}
+      <div className="content-card">
+        <h3>Account Details</h3>
+        <div className="account-details">
+          <div className="detail-row">
+            <span className="detail-label">User ID:</span>
+            <span className="detail-value">{user?.uid}</span>
+          </div>
+          <div className="detail-row">
+            <span className="detail-label">Account Created:</span>
+            <span className="detail-value">
+              {user?.metadata?.creationTime
+                ? new Date(user.metadata.creationTime).toLocaleDateString()
+                : 'Unknown'}
+            </span>
+          </div>
+          <div className="detail-row">
+            <span className="detail-label">Last Sign In:</span>
+            <span className="detail-value">
+              {user?.metadata?.lastSignInTime
+                ? new Date(user.metadata.lastSignInTime).toLocaleDateString()
+                : 'Unknown'}
+            </span>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+

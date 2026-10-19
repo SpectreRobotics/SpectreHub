@@ -1,21 +1,40 @@
-# Reflect
+# SpectreHub
 
-Modern dashboard for FRC with configurable widgets, drag-and-drop, pan-and-zoom capabilities and multiple dashboard
-views.
+Unified FRC **Scouting** & **Driver Station Dashboard** platform for **Spectre Robotics**.
 
-Available online at [reflect.2702rebels.com](https://reflect.2702rebels.com/) and as a lightweight
-[downloadable desktop application](https://github.com/2702rebels/reflect/releases/latest).
+- **Landing Screen**: Displays the **SpectreHub** work-in-progress home screen when opened.
+- **Scouting Tab**: Currently an empty placeholder tab ready for integration from the cloned [`pinkscout/`](./pinkscout) repository (`RTMBE/Pinkscout`).
+- **Dashboard (Reflect) Tab**: Full fork of the [2702 Rebels Reflect](https://github.com/2702rebels/reflect) FRC Driver Station dashboard.
 
-[Documentation](https://reflect-docs.2702rebels.com/) for installation and usage guide.
+---
 
-Built with modern web technologies on [React](https://react.dev/)/[Vite](https://vite.dev/) stack and is written in
-Typescript.
+## Running on Windows (Driver Station & Local Dev)
 
-Developed and supported by [Rebels (FRC 2702)](https://2702rebels.com/).
+### Option 1: Quick Windows App Window (`Start-SpectreHub.bat`)
+Double-click `Start-SpectreHub.bat` (or run `npm run dev` and open `http://localhost:1420`). It launches SpectreHub in a standalone Windows app window (`msedge --app=http://localhost:1420`).
 
-![Reflect Hero](/hero.webp)
+### Option 2: Native Windows `.exe` (Tauri)
+Because SpectreHub is built on Tauri (`src-tauri/`), you can build a native Windows installer and standalone `.exe` (requires [Rust](https://rustup.rs/)):
+```bash
+npm run build-app
+```
+Or trigger the GitHub Actions release workflow (`.github/workflows/release.yml`) to automatically build `win-x64` and `win-arm64` executables.
 
-## Contributing
+---
 
-Contributions are welcome! See [CONTRIBUTING.md](https://github.com/2702rebels/reflect/blob/main/CONTRIBUTING.md) to get
-started.
+## Deploying to Cloudflare Pages (For Scouters & Web Access)
+
+### Option A: Connect GitHub Repo in Cloudflare Dashboard
+1. Push this repository to [`https://github.com/SpectreRobotics/SpectreHub.git`](https://github.com/SpectreRobotics/SpectreHub.git).
+2. In the **Cloudflare Dashboard**, go to **Workers & Pages** → **Create** → **Pages** → **Connect to Git** and select `SpectreRobotics/SpectreHub`.
+3. Use these build settings:
+   - **Framework preset**: `Vite`
+   - **Build command**: `npm run build`
+   - **Build output directory**: `dist`
+   - **Environment variables**: `NODE_VERSION` = `22`
+
+### Option B: Direct CLI Deploy with Wrangler
+```bash
+npm run build
+npx wrangler pages deploy dist --project-name=spectrehub
+```

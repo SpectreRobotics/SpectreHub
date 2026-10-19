@@ -1,10 +1,9 @@
 {
-  "name": "@2702rebels/reflect",
-  "description": "Modern dashboard for FIRST Robotics ecosystem",
+  "name": "spectrehub",
+  "description": "SpectreHub - FRC Scouting & Driver Station Dashboard",
   "version": "2026.0.6",
   "type": "module",
   "scripts": {
-    "preinstall": "npx only-allow pnpm",
     "dev": "vite",
     "build": "tsc && vite build",
     "build-app": "tauri build",

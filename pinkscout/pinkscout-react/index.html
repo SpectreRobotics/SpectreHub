@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<!--
+================================================================================
+INDEX.HTML - React App Entry Point (PinkScout FRC Scouting App)
+================================================================================
+
+WHAT IS THIS FILE?
+This is the single HTML file for the React SPA (Single Page Application).
+React Router handles all navigation within this one page.
+
+SEO NOTES:
+- React Helmet is used for dynamic meta tags
+- Consider using prerender hints for better crawlability
+
+PWA NOTES:
+- Service worker registered via vite-plugin-pwa
+- Manifest generated automatically by vite-plugin-pwa
+
+================================================================================
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- PWA Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+
+    <!-- Viewport and PWA settings -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="description" content="PinkScout - FRC Team Scouting Application for FIRST Robotics Competition" />
+    <meta name="theme-color" content="#e91e63" />
+
+    <!-- PWA iOS settings -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="PinkScout" />
+
+    <!-- Prevent automatic translation (interferes with React) -->
+    <meta name="google" content="notranslate" />
+
+    <title>PinkScout - FRC Scouting App</title>
+  </head>
+  <body>
+    <!-- 
+    ROOT DIV
+    ========
+    React mounts the entire application into this div.
+    All React components are rendered inside #root.
+    -->
+    <div id="root"></div>
+    
+    <!-- React app entry point -->
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+

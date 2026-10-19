@@ -1,0 +1,993 @@
+/**
+ * =============================================================================
+ * TEAMS.JSX - Team Search and Stats Page (Matching Original PinkScout Design)
+ * =============================================================================
+ *
+ * FEATURES:
+ * - Search by team number with URL param support
+ * - Team header with classification badge (Elite, Top Tier, Normal, Below Avg)
+ * - Team Overview cards (EPA Rating, Record, Your Scouting)
+ * - Data source tabs (Statbotics / Scouting Data)
+ * - Split view with colored stat boxes
+ * - Match history table
+ *
+ * =============================================================================
+ */
+
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { Helmet } from 'react-helmet-async';
+import { getStatboticsTeam, getTeamYearStats } from '../services/statboticsAPI';
+import { getTeamInfo, getTeamAllAwards, getTeamAwardsForYear, getTeamMatchesForYear, getTeamYearsParticipated, searchTeams } from '../services/blueAllianceAPI';
+import { getTeamScoutingData } from '../services/scoutingService';
+import { scaleStatboticsEPA, classifyEPA, getEPAPercentile, calculateAutoPoints, calculateTeleopPoints, EPA_TYPES, EPA_TYPE_LABELS, getEPAByType, calculateTrueEPA } from '../utils/epaUtils';
+import { useAuth } from '../contexts/AuthContext';
+import { useDataSharing } from '../hooks/useDataSharing';
+import { calculateAverageECS, getScoutingConfig, DEFAULT_SCORING_WEIGHTS } from '../services/scoutingConfigService';
+import { getPerformanceMetrics } from '../utils/performanceMetrics';
+
+export default function Teams() {
+  const { roleContext } = useAuth();
+  const { useAllEventData } = useDataSharing();
+  // ==========================================================================
+  // STATE
+  // ==========================================================================
+
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [teamNumber, setTeamNumber] = useState(searchParams.get('team') || '');
+  const [teamData, setTeamData] = useState(null);
+  const [tbaData, setTbaData] = useState(null);
+  const [scoutingData, setScoutingData] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  // Search suggestions state
+  const [searchResults, setSearchResults] = useState([]);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [searchingTeams, setSearchingTeams] = useState(false);
+  const searchInputRef = useRef(null);
+  const suggestionsRef = useRef(null);
+
+  // Awards state
+  const [allAwards, setAllAwards] = useState([]);
+  const [awardsViewMode, setAwardsViewMode] = useState('thisYear'); // 'thisYear' or 'allTime'
+
+  // Record/matches state
+  const [recordViewMode, setRecordViewMode] = useState('thisYear'); // 'thisYear' or 'allTime'
+  const [thisYearMatches, setThisYearMatches] = useState([]);
+  const [allTimeRecord, setAllTimeRecord] = useState({ wins: 0, losses: 0, ties: 0 });
+  const [thisYearRecord, setThisYearRecord] = useState({ wins: 0, losses: 0, ties: 0 });
+
+  // Filter state
+  const currentYear = new Date().getFullYear();
+  const [selectedYear, setSelectedYear] = useState('all');
+  const [selectedEvent, setSelectedEvent] = useState('all');
+
+  // EPA type state (for dropdown selector)
+  const [epaType, setEpaType] = useState(EPA_TYPES.OVERALL);
+
+  // ECS scoring weights and score
+  const [ecsWeights, setEcsWeights] = useState(DEFAULT_SCORING_WEIGHTS);
+  const [ecsScore, setEcsScore] = useState(0);
+
+  // Performance metrics state
+  const [perfMetrics, setPerfMetrics] = useState(null);
+
+  // Load ECS weights from team configuration
+  useEffect(() => {
+    async function loadEcsWeights() {
+      if (roleContext?.teamLeadUid) {
+        const config = await getScoutingConfig(roleContext.teamLeadUid, 2026);
+        if (config?.scoring_weights) {
+          setEcsWeights(config.scoring_weights);
+        }
+      }
+    }
+    loadEcsWeights();
+  }, [roleContext?.teamLeadUid]);
+
+  // ==========================================================================
+  // SEARCH ON URL PARAM CHANGE
+  // ==========================================================================
+
+  useEffect(() => {
+    const teamParam = searchParams.get('team');
+    if (teamParam) {
+      setTeamNumber(teamParam);
+      searchTeam(teamParam);
+    }
+  }, [searchParams]);
+
+  // ==========================================================================
+  // SEARCH SUGGESTIONS (debounced team name/number search)
+  // ==========================================================================
+
+  useEffect(() => {
+    const query = teamNumber.trim();
+    if (query.length < 2) {
+      setSearchResults([]);
+      setShowSuggestions(false);
+      return;
+    }
+
+    // Debounce the search
+    const timer = setTimeout(async () => {
+      setSearchingTeams(true);
+      try {
+        const results = await searchTeams(query, 8);
+        setSearchResults(results);
+        setShowSuggestions(results.length > 0);
+      } catch (err) {
+        console.error('Error searching teams:', err);
+        setSearchResults([]);
+      } finally {
+        setSearchingTeams(false);
+      }
+    }, 300);
+
+    return () => clearTimeout(timer);
+  }, [teamNumber]);
+
+  // Close suggestions when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (
+        suggestionsRef.current &&
+        !suggestionsRef.current.contains(e.target) &&
+        searchInputRef.current &&
+        !searchInputRef.current.contains(e.target)
+      ) {
+        setShowSuggestions(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  // ==========================================================================
+  // SEARCH HANDLER
+  // ==========================================================================
+
+  const handleSearch = (e) => {
+    e.preventDefault();
+    if (!teamNumber.trim()) return;
+
+    setShowSuggestions(false);
+    // Update URL
+    setSearchParams({ team: teamNumber.trim() });
+    searchTeam(teamNumber.trim());
+  };
+
+  const handleSelectSuggestion = (result) => {
+    setTeamNumber(result.teamNumber);
+    setShowSuggestions(false);
+    setSearchParams({ team: result.teamNumber });
+    searchTeam(result.teamNumber);
+  };
+
+  const searchTeam = async (query) => {
+    setLoading(true);
+    setError(null);
+    setTeamData(null);
+    setTbaData(null);
+    setScoutingData([]);
+    setAllAwards([]);
+    setThisYearMatches([]);
+    setAllTimeRecord({ wins: 0, losses: 0, ties: 0 });
+    setThisYearRecord({ wins: 0, losses: 0, ties: 0 });
+    // Reset filters when searching new team
+    setSelectedYear('all');
+    setSelectedEvent('all');
+
+    // Check if query is a valid team number
+    const isNumeric = /^\d+$/.test(query);
+
+    // If not numeric, try to find a matching team first
+    let teamNumberToSearch = query;
+    if (!isNumeric) {
+      try {
+        const results = await searchTeams(query, 1);
+        if (results.length > 0) {
+          teamNumberToSearch = results[0].teamNumber;
+          setTeamNumber(teamNumberToSearch);
+        } else {
+          setError(`No team found matching "${query}". Try searching by team number or select from suggestions.`);
+          setLoading(false);
+          return;
+        }
+      } catch (err) {
+        console.error('Error searching for team:', err);
+        setError(`Could not search for "${query}". Please enter a team number directly.`);
+        setLoading(false);
+        return;
+      }
+    }
+
+    try {
+      // Fetch data from all sources in parallel, handling individual failures
+      const [statboticsResult, tbaResult, scoutingResult, awardsResult, thisYearMatchesResult, thisYearStatsResult] = await Promise.allSettled([
+        getStatboticsTeam(teamNumberToSearch),
+        getTeamInfo(teamNumberToSearch),
+        getTeamScoutingData(teamNumberToSearch, { roleContext, useAllEventData }),
+        getTeamAllAwards(teamNumberToSearch),
+        getTeamMatchesForYear(teamNumberToSearch, currentYear),
+        getTeamYearStats(teamNumberToSearch, currentYear)
+      ]);
+
+      const statbotics = statboticsResult.status === 'fulfilled' ? statboticsResult.value : null;
+      const tba = tbaResult.status === 'fulfilled' ? tbaResult.value : null;
+      const scouting = scoutingResult.status === 'fulfilled' ? scoutingResult.value : [];
+      const awards = awardsResult.status === 'fulfilled' ? awardsResult.value : [];
+      const yearMatches = thisYearMatchesResult.status === 'fulfilled' ? thisYearMatchesResult.value : [];
+      const yearStats = thisYearStatsResult.status === 'fulfilled' ? thisYearStatsResult.value : null;
+
+      if (!statbotics && !tba) {
+        setError(`Team ${teamNumberToSearch} not found. Please check the team number.`);
+        return;
+      }
+
+      setTeamData(statbotics);
+      setTbaData(tba);
+      setScoutingData(scouting);
+      setAllAwards(awards);
+      setThisYearMatches(yearMatches);
+
+      // Calculate ECS from scouting data
+      const calculatedEcs = calculateAverageECS(scouting, ecsWeights);
+      setEcsScore(calculatedEcs);
+
+      // Calculate performance metrics
+      const metrics = getPerformanceMetrics(scouting);
+      setPerfMetrics(metrics);
+
+      // Calculate records
+      // All-time record from statbotics base data
+      if (statbotics?.record) {
+        setAllTimeRecord({
+          wins: statbotics.record.wins || 0,
+          losses: statbotics.record.losses || 0,
+          ties: statbotics.record.ties || 0
+        });
+      }
+
+      // This year record from year stats or calculate from matches
+      if (yearStats?.record) {
+        setThisYearRecord({
+          wins: yearStats.record.wins || 0,
+          losses: yearStats.record.losses || 0,
+          ties: yearStats.record.ties || 0
+        });
+      } else if (yearMatches.length > 0) {
+        // Calculate from matches
+        let wins = 0, losses = 0, ties = 0;
+        yearMatches.forEach(match => {
+          if (!match.alliances) return;
+          const teamKey = `frc${number}`;
+          const isBlue = match.alliances.blue?.team_keys?.includes(teamKey);
+          const isRed = match.alliances.red?.team_keys?.includes(teamKey);
+          if (!isBlue && !isRed) return;
+
+          const blueScore = match.alliances.blue?.score ?? -1;
+          const redScore = match.alliances.red?.score ?? -1;
+          if (blueScore < 0 || redScore < 0) return; // Match not played yet
+
+          if (isBlue) {
+            if (blueScore > redScore) wins++;
+            else if (blueScore < redScore) losses++;
+            else ties++;
+          } else {
+            if (redScore > blueScore) wins++;
+            else if (redScore < blueScore) losses++;
+            else ties++;
+          }
+        });
+        setThisYearRecord({ wins, losses, ties });
+      }
+    } catch (err) {
+      console.error('Error searching team:', err);
+      setError('Failed to fetch team data. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ==========================================================================
+  // FILTER SCOUTING DATA
+  // ==========================================================================
+
+  // Extract unique years and events from scouting data
+  const { availableYears, availableEvents } = useMemo(() => {
+    const years = new Set();
+    const events = new Map(); // eventKey -> eventKey (for display)
+
+    scoutingData.forEach(entry => {
+      // Extract year from eventKey (e.g., "2025flor" -> 2025) or eventYear field
+      const year = entry.eventYear || (entry.eventKey ? parseInt(entry.eventKey.substring(0, 4)) : null);
+      if (year && !isNaN(year)) {
+        years.add(year);
+      }
+      if (entry.eventKey) {
+        events.set(entry.eventKey, entry.eventKey);
+      }
+    });
+
+    return {
+      availableYears: [...years].sort((a, b) => b - a),
+      availableEvents: [...events.keys()].sort()
+    };
+  }, [scoutingData]);
+
+  // Filter scouting data based on selected year and event
+  const filteredScoutingData = useMemo(() => {
+    return scoutingData.filter(entry => {
+      // Year filter
+      if (selectedYear !== 'all') {
+        const entryYear = entry.eventYear || (entry.eventKey ? parseInt(entry.eventKey.substring(0, 4)) : null);
+        if (entryYear !== parseInt(selectedYear)) return false;
+      }
+
+      // Event filter
+      if (selectedEvent !== 'all') {
+        if (entry.eventKey !== selectedEvent) return false;
+      }
+
+      return true;
+    });
+  }, [scoutingData, selectedYear, selectedEvent]);
+
+  // Filter available events based on selected year
+  const filteredAvailableEvents = useMemo(() => {
+    if (selectedYear === 'all') return availableEvents;
+    return availableEvents.filter(eventKey => eventKey.startsWith(selectedYear));
+  }, [availableEvents, selectedYear]);
+
+  // Reset event selection when year changes
+  const handleYearChange = (year) => {
+    setSelectedYear(year);
+    setSelectedEvent('all');
+  };
+
+  // ==========================================================================
+  // COMPUTED VALUES
+  // ==========================================================================
+
+  // Calculate True EPA from scouting data (independent of Statbotics)
+  const trueEPA = useMemo(() => calculateTrueEPA(filteredScoutingData), [filteredScoutingData]);
+
+  // Get EPA value based on selected type
+  const epaValue = useMemo(() => {
+    if (epaType === EPA_TYPES.TRUE) {
+      return trueEPA.hasData ? trueEPA.total : null;
+    }
+    return teamData ? getEPAByType(teamData, epaType) : 0;
+  }, [teamData, epaType, trueEPA]);
+
+  // Get component EPA values for True EPA display
+  const epaComponentValue = useMemo(() => {
+    if (epaType === EPA_TYPES.TRUE) {
+      return trueEPA.hasData ? trueEPA.total : null;
+    }
+    if (epaType === EPA_TYPES.AUTO) {
+      return epaType === EPA_TYPES.TRUE ? trueEPA.auto : getEPAByType(teamData, EPA_TYPES.AUTO);
+    }
+    if (epaType === EPA_TYPES.TELEOP) {
+      return epaType === EPA_TYPES.TRUE ? trueEPA.teleop : getEPAByType(teamData, EPA_TYPES.TELEOP);
+    }
+    if (epaType === EPA_TYPES.ENDGAME) {
+      return epaType === EPA_TYPES.TRUE ? trueEPA.endgame : getEPAByType(teamData, EPA_TYPES.ENDGAME);
+    }
+    return epaValue;
+  }, [teamData, epaType, trueEPA, epaValue]);
+
+  const epaPercentile = teamData ? getEPAPercentile(teamData) : 0;
+  const classification = classifyEPA(epaPercentile);
+
+  // Get record based on view mode
+  const displayRecord = recordViewMode === 'thisYear' ? thisYearRecord : allTimeRecord;
+  const wins = displayRecord.wins;
+  const losses = displayRecord.losses;
+  const ties = displayRecord.ties;
+  const totalMatches = wins + losses + ties;
+  const winRate = totalMatches > 0 ? ((wins / totalMatches) * 100).toFixed(0) : 'N/A';
+
+  // Filter awards based on view mode
+  const displayAwards = useMemo(() => {
+    if (awardsViewMode === 'thisYear') {
+      return allAwards.filter(award => award.year === currentYear);
+    }
+    return allAwards;
+  }, [allAwards, awardsViewMode, currentYear]);
+
+  // ==========================================================================
+  // CALCULATE SCOUTING AVERAGES (using filtered data)
+  // ==========================================================================
+
+  const scoutingAvg = filteredScoutingData.length > 0 ? {
+    autoPoints: filteredScoutingData.reduce((s, e) => s + calculateAutoPoints(e), 0) / filteredScoutingData.length,
+    teleopPoints: filteredScoutingData.reduce((s, e) => s + calculateTeleopPoints(e), 0) / filteredScoutingData.length,
+    totalPoints: filteredScoutingData.reduce((s, e) => s + calculateAutoPoints(e) + calculateTeleopPoints(e), 0) / filteredScoutingData.length,
+    autoSpeaker: filteredScoutingData.reduce((s, e) => s + (e.autoSpeaker || 0), 0) / filteredScoutingData.length,
+    autoAmp: filteredScoutingData.reduce((s, e) => s + (e.autoAmp || 0), 0) / filteredScoutingData.length,
+    teleopSpeaker: filteredScoutingData.reduce((s, e) => s + (e.teleopSpeaker || 0), 0) / filteredScoutingData.length,
+    teleopAmp: filteredScoutingData.reduce((s, e) => s + (e.teleopAmp || 0), 0) / filteredScoutingData.length,
+    bestMatch: Math.max(...filteredScoutingData.map(e => calculateAutoPoints(e) + calculateTeleopPoints(e))),
+    matchCount: filteredScoutingData.length
+  } : null;
+
+  // ==========================================================================
+  // RENDER
+  // ==========================================================================
+
+  return (
+    <>
+      <Helmet>
+        <title>Teams - PinkScout</title>
+        <meta name="description" content="Search FRC teams and view their EPA ratings" />
+      </Helmet>
+
+      {/* Page Header */}
+      <header className="page-header">
+        <h1>🔍 Team Search</h1>
+        <p>Search for any FRC team to view combined statistics</p>
+      </header>
+
+      {/* Search Bar */}
+      <div className="content-card search-card">
+        <form onSubmit={handleSearch} className="search-form">
+          <div style={{ flex: 1, position: 'relative' }}>
+            <input
+              ref={searchInputRef}
+              type="text"
+              value={teamNumber}
+              onChange={(e) => setTeamNumber(e.target.value)}
+              onFocus={() => searchResults.length > 0 && setShowSuggestions(true)}
+              placeholder="Search by team number or name (e.g., 254 or Cheesy Poofs)"
+              title="Enter a team number or team name"
+              className="search-input"
+              style={{ width: '100%' }}
+              autoComplete="off"
+            />
+            {/* Search Suggestions Dropdown */}
+            {showSuggestions && searchResults.length > 0 && (
+              <div
+                ref={suggestionsRef}
+                className="search-suggestions"
+                style={{
+                  position: 'absolute',
+                  top: '100%',
+                  left: 0,
+                  right: 0,
+                  backgroundColor: 'var(--card-bg)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: 'var(--shadow-lg)',
+                  zIndex: 100,
+                  marginTop: '4px',
+                  maxHeight: '300px',
+                  overflowY: 'auto'
+                }}
+              >
+                {searchResults.map((result, idx) => (
+                  <div
+                    key={result.teamNumber}
+                    onClick={() => handleSelectSuggestion(result)}
+                    style={{
+                      padding: 'var(--spacing-sm) var(--spacing-md)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center',
+                      borderBottom: idx < searchResults.length - 1 ? '1px solid var(--border-color)' : 'none',
+                      transition: 'background-color 0.15s ease'
+                    }}
+                    onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--hover-bg)'}
+                    onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                  >
+                    <span>
+                      <strong style={{ color: 'var(--primary-color)' }}>#{result.teamNumber}</strong>
+                      {' '}
+                      <span style={{ color: 'var(--text-secondary)' }}>{result.nickname}</span>
+                    </span>
+                    <span style={{
+                      fontSize: '0.75rem',
+                      color: 'var(--text-muted)',
+                      textTransform: 'capitalize'
+                    }}>
+                      {result.matchType.replace(/_/g, ' ')}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {searchingTeams && teamNumber.length >= 2 && (
+              <div style={{
+                position: 'absolute',
+                right: '12px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                fontSize: '0.8rem',
+                color: 'var(--text-muted)'
+              }}>
+                ...
+              </div>
+            )}
+          </div>
+          <button type="submit" className="btn btn-primary" disabled={loading}>
+            {loading ? 'Searching...' : 'Search'}
+          </button>
+        </form>
+      </div>
+
+      {/* Results Container */}
+      {(loading || teamData || tbaData || error) && (
+        <div id="resultsContainer">
+          {/* Loading State */}
+          {loading && (
+            <div className="content-card">
+              <div className="loading-container">
+                <div className="loading-spinner"></div>
+                <p>Loading team data...</p>
+              </div>
+            </div>
+          )}
+
+          {/* Error State */}
+          {error && (
+            <div className="content-card">
+              <div className="placeholder-content">
+                <div className="icon">🔍</div>
+                <h3>No Team Found</h3>
+                <p>{error}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Team Header with Classification Badge */}
+          {!loading && !error && (teamData || tbaData) && (
+            <div className="content-card team-header-card">
+              <div className="team-header">
+                <div className="team-identity">
+                  <h2>{tbaData?.nickname || teamData?.team || `Team ${teamNumber}`}</h2>
+                  <span className="team-number-badge">#{teamNumber}</span>
+                </div>
+                {teamData && (
+                  <div className="classification-badge-container">
+                    <span
+                      className="classification-badge"
+                      style={{ backgroundColor: classification.color }}
+                    >
+                      {classification.emoji} {classification.label}
+                    </span>
+                    <span className="classification-desc">{classification.description}</span>
+                  </div>
+                )}
+              </div>
+              {tbaData && (
+                <p className="team-location">
+                  {tbaData.city}, {tbaData.state_prov}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Team Overview - 3 Cards */}
+          {!loading && !error && (teamData || tbaData) && (
+            <div className="content-card">
+              <h3>📊 Team Overview</h3>
+              <div className="overview-cards">
+                {/* EPA Rating Card with Dropdown */}
+                <div className="overview-card epa-card" style={{ borderLeftColor: epaType === EPA_TYPES.TRUE ? (trueEPA.hasData ? '#4CAF50' : '#9E9E9E') : classification.color }}>
+                  <div className="overview-card-header">
+                    <span className="overview-icon">📊</span>
+                    <select
+                      value={epaType}
+                      onChange={(e) => setEpaType(e.target.value)}
+                      style={{
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'inherit',
+                        fontSize: 'inherit',
+                        fontWeight: 'inherit',
+                        cursor: 'pointer',
+                        padding: '0',
+                        marginLeft: '-4px'
+                      }}
+                    >
+                      {Object.entries(EPA_TYPE_LABELS).map(([value, label]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="overview-card-value">
+                    {epaType === EPA_TYPES.TRUE ? (
+                      trueEPA.hasData ? trueEPA.total.toFixed(1) : '—'
+                    ) : (
+                      epaValue !== null ? epaValue.toFixed(1) : '0.0'
+                    )}
+                  </div>
+                  <div className="overview-card-sub">
+                    {epaType === EPA_TYPES.TRUE ? (
+                      trueEPA.hasData ? (
+                        <span>{trueEPA.matchCount} match{trueEPA.matchCount !== 1 ? 'es' : ''} scouted</span>
+                      ) : (
+                        <span style={{ color: 'var(--text-muted)' }}>Insufficient scouting data</span>
+                      )
+                    ) : (
+                      <>
+                        Percentile: {epaPercentile.toFixed(0)}%
+                        <span className="mini-badge" style={{ color: classification.color }}>
+                          {classification.emoji} {classification.label}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Record Card with Toggle */}
+                <div className="overview-card">
+                  <div className="overview-card-header">
+                    <span className="overview-icon">🏆</span>
+                    <span>Record</span>
+                    <div className="toggle-switch-mini" style={{ marginLeft: 'auto' }}>
+                      <button
+                        className={`toggle-btn-mini ${recordViewMode === 'thisYear' ? 'active' : ''}`}
+                        onClick={() => setRecordViewMode('thisYear')}
+                      >
+                        {currentYear}
+                      </button>
+                      <button
+                        className={`toggle-btn-mini ${recordViewMode === 'allTime' ? 'active' : ''}`}
+                        onClick={() => setRecordViewMode('allTime')}
+                      >
+                        All
+                      </button>
+                    </div>
+                  </div>
+                  <div className="overview-card-value">{wins}-{losses}-{ties}</div>
+                  <div className="overview-card-sub">
+                    Win Rate: {winRate}% ({recordViewMode === 'thisYear' ? currentYear : 'All Time'})
+                  </div>
+                </div>
+
+                {/* ECS Score Card */}
+                <div className="overview-card ecs-card" style={{ borderLeftColor: '#9C27B0' }}>
+                  <div className="overview-card-header">
+                    <span className="overview-icon">⚡</span>
+                    <span>ECS Score</span>
+                  </div>
+                  <div className="overview-card-value" style={{ color: '#9C27B0' }}>
+                    {ecsScore > 0 ? ecsScore.toFixed(1) : '—'}
+                  </div>
+                  <div className="overview-card-sub">
+                    {ecsScore > 0 ? (
+                      <span>Estimated Contribution Score</span>
+                    ) : (
+                      <span style={{ color: 'var(--text-muted)' }}>No scouting data</span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Performance Trends Card */}
+                {perfMetrics && perfMetrics.matchCount >= 3 && (
+                  <div className="overview-card performance-card" style={{ borderLeftColor: perfMetrics.trendBadge.color }}>
+                    <div className="overview-card-header">
+                      <span className="overview-icon">{perfMetrics.trendBadge.emoji}</span>
+                      <span>{perfMetrics.trendBadge.label}</span>
+                    </div>
+                    <div className="overview-card-value" style={{ color: perfMetrics.trendBadge.color }}>
+                      {perfMetrics.slope > 0 ? '+' : ''}{perfMetrics.slope.toFixed(1)} pts/match
+                    </div>
+                    <div className="overview-card-sub">
+                      {perfMetrics.trendBadge.description}
+                    </div>
+                    <div className="performance-metrics-mini">
+                      <span title="Consistency Index">🎯 {perfMetrics.consistency}%</span>
+                      <span title="Volatility">📊 ±{perfMetrics.volatility}</span>
+                      {perfMetrics.recentForm !== null && (
+                        <span title="Recent Form vs Average" style={{ color: perfMetrics.recentForm >= 0 ? '#4CAF50' : '#FF9800' }}>
+                          📈 {perfMetrics.recentForm >= 0 ? '+' : ''}{perfMetrics.recentForm}%
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Your Scouting Card */}
+                <div className="overview-card scouting-card">
+                  <div className="overview-card-header">
+                    <span className="overview-icon">📋</span>
+                    <span>Your Scouting</span>
+                  </div>
+                  <div className="overview-card-value">
+                    {scoutingAvg ? scoutingAvg.totalPoints.toFixed(1) : '0'} pts
+                  </div>
+                  <div className="overview-card-sub">
+                    {filteredScoutingData.length} matches {selectedYear !== 'all' || selectedEvent !== 'all' ? '(filtered)' : 'scouted'}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Data Sources - Split View */}
+          {!loading && !error && (teamData || tbaData) && (
+            <div className="split-view">
+              {/* Statbotics Data */}
+              <div className="split-pane">
+                <div className="content-card data-source-card">
+                  <h3>📈 Statbotics Data</h3>
+                  <p className="pane-subtitle">External EPA rankings and statistics (points per match)</p>
+                  {teamData ? (
+                    <div className="stat-boxes-grid">
+                      <div className="stat-box epa-box">
+                        <div className="stat-box-value" style={{ color: '#e91e63' }}>
+                          {getEPAByType(teamData, EPA_TYPES.OVERALL)?.toFixed(1) || '0.0'}
+                        </div>
+                        <div className="stat-box-label">Overall EPA</div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-box-value" style={{ color: '#2196F3' }}>
+                          {getEPAByType(teamData, EPA_TYPES.AUTO)?.toFixed(1) || '0.0'}
+                        </div>
+                        <div className="stat-box-label">Auto EPA</div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-box-value" style={{ color: '#4CAF50' }}>
+                          {getEPAByType(teamData, EPA_TYPES.TELEOP)?.toFixed(1) || '0.0'}
+                        </div>
+                        <div className="stat-box-label">Teleop EPA</div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-box-value" style={{ color: '#FF9800' }}>
+                          {getEPAByType(teamData, EPA_TYPES.ENDGAME)?.toFixed(1) || '0.0'}
+                        </div>
+                        <div className="stat-box-label">Endgame EPA</div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-box-value" style={{ color: '#e91e63' }}>
+                          {epaPercentile.toFixed(0)}%
+                        </div>
+                        <div className="stat-box-label">Percentile</div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-box-value">
+                          {wins}-{losses}-{ties}
+                        </div>
+                        <div className="stat-box-label">Record</div>
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="no-data">No Statbotics data available</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Scouting Data */}
+              <div className="split-pane">
+                <div className="content-card data-source-card">
+                  <h3>📋 Your Scouting Data</h3>
+                  <p className="pane-subtitle">Data from your team's observations</p>
+
+                  {/* Year/Event Filter */}
+                  {scoutingData.length > 0 && (
+                    <div className="scouting-filters" style={{
+                      display: 'flex',
+                      gap: '1rem',
+                      marginBottom: '1rem',
+                      flexWrap: 'wrap'
+                    }}>
+                      <div className="form-group" style={{ flex: '1', minWidth: '120px' }}>
+                        <label htmlFor="yearFilter" style={{ fontSize: '0.75rem', marginBottom: '0.25rem' }}>Year</label>
+                        <select
+                          id="yearFilter"
+                          value={selectedYear}
+                          onChange={(e) => handleYearChange(e.target.value)}
+                          style={{ width: '100%' }}
+                        >
+                          <option value="all">All Years</option>
+                          {availableYears.map(year => (
+                            <option key={year} value={year}>{year}</option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="form-group" style={{ flex: '2', minWidth: '180px' }}>
+                        <label htmlFor="eventFilter" style={{ fontSize: '0.75rem', marginBottom: '0.25rem' }}>Event</label>
+                        <select
+                          id="eventFilter"
+                          value={selectedEvent}
+                          onChange={(e) => setSelectedEvent(e.target.value)}
+                          style={{ width: '100%' }}
+                        >
+                          <option value="all">All Events</option>
+                          {filteredAvailableEvents.map(eventKey => (
+                            <option key={eventKey} value={eventKey}>{eventKey}</option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  )}
+
+                  {filteredScoutingData.length > 0 && scoutingAvg ? (
+                    <div className="stat-boxes-grid scouting-boxes">
+                      <div className="stat-box">
+                        <div className="stat-box-value" style={{ color: '#e91e63' }}>
+                          {scoutingAvg.matchCount}
+                        </div>
+                        <div className="stat-box-label">Matches Scouted</div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-box-value" style={{ color: '#e91e63' }}>
+                          {scoutingAvg.totalPoints.toFixed(1)}
+                        </div>
+                        <div className="stat-box-label">Avg Total</div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-box-value" style={{ color: '#e91e63' }}>
+                          {scoutingAvg.autoPoints.toFixed(1)}
+                        </div>
+                        <div className="stat-box-label">Avg Auto</div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-box-value" style={{ color: '#e91e63' }}>
+                          {scoutingAvg.teleopPoints.toFixed(1)}
+                        </div>
+                        <div className="stat-box-label">Avg Teleop</div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-box-value" style={{ color: '#e91e63' }}>
+                          {scoutingAvg.bestMatch}
+                        </div>
+                        <div className="stat-box-label">Best Match</div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-box-value">Consistent</div>
+                        <div className="stat-box-label">Consistency</div>
+                      </div>
+                    </div>
+                  ) : scoutingData.length > 0 ? (
+                    <p className="no-data">No scouting data matches the selected filters</p>
+                  ) : (
+                    <p className="no-data">No scouting data available for this team</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Awards Section */}
+          {!loading && !error && (teamData || tbaData) && (
+            <div className="content-card awards-section">
+              <div className="section-header-with-toggle">
+                <h3>🏅 Awards</h3>
+                <div className="toggle-switch">
+                  <button
+                    className={`toggle-btn ${awardsViewMode === 'thisYear' ? 'active' : ''}`}
+                    onClick={() => setAwardsViewMode('thisYear')}
+                  >
+                    {currentYear}
+                  </button>
+                  <button
+                    className={`toggle-btn ${awardsViewMode === 'allTime' ? 'active' : ''}`}
+                    onClick={() => setAwardsViewMode('allTime')}
+                  >
+                    All Time
+                  </button>
+                </div>
+              </div>
+              <p className="section-subtitle">
+                {awardsViewMode === 'thisYear'
+                  ? `Awards won in ${currentYear}`
+                  : `All-time awards (${allAwards.length} total)`}
+              </p>
+
+              {displayAwards.length > 0 ? (
+                <div className="awards-list">
+                  {displayAwards.map((award, idx) => (
+                    <div key={`${award.event_key}-${award.award_type}-${idx}`} className="award-card">
+                      <div className="award-icon">
+                        {award.award_type === 0 ? '🌟' :
+                         award.award_type === 1 ? '🥇' :
+                         award.award_type === 2 ? '🥈' :
+                         award.award_type === 69 ? '🔧' :
+                         award.award_type === 9 ? '📐' :
+                         '🏅'}
+                      </div>
+                      <div className="award-details">
+                        <div className="award-name">{award.name}</div>
+                        <div className="award-event">
+                          {award.event_key} • {award.year}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="no-data">
+                  {awardsViewMode === 'thisYear'
+                    ? `No awards won in ${currentYear} yet`
+                    : 'No awards on record'}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Match History */}
+          {!loading && !error && filteredScoutingData.length > 0 && (
+            <div className="content-card">
+              <h3>📜 Match History {selectedYear !== 'all' || selectedEvent !== 'all' ? '(Filtered)' : ''}</h3>
+              <div className="table-container">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Match</th>
+                      <th>Event</th>
+                      <th>Auto Pts</th>
+                      <th>Teleop Pts</th>
+                      <th>Total</th>
+                      <th>Scouter</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredScoutingData.map((entry, idx) => {
+                      const autoPoints = calculateAutoPoints(entry);
+                      const teleopPoints = calculateTeleopPoints(entry);
+                      return (
+                        <tr key={entry.id || idx}>
+                          <td data-label="Match">{entry.matchNumber || '-'}</td>
+                          <td data-label="Event">{entry.eventKey || '-'}</td>
+                          <td data-label="Auto Pts">{autoPoints}</td>
+                          <td data-label="Teleop Pts">{teleopPoints}</td>
+                          <td data-label="Total"><strong>{autoPoints + teleopPoints}</strong></td>
+                          <td data-label="Scouter">{entry.scouterName || 'Unknown'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Team Notes Section */}
+          {filteredScoutingData.length > 0 && (
+            <div className="content-card team-notes-section">
+              <h3>📝 Team Notes</h3>
+              <p className="section-subtitle">
+                Notes from scouting entries {selectedYear !== 'all' || selectedEvent !== 'all' ? '(filtered)' : ''}
+              </p>
+              <div className="team-notes-list">
+                {filteredScoutingData
+                  .filter(entry => entry.notes && entry.notes.trim())
+                  .map((entry, idx) => (
+                    <div key={entry.id || idx} className="team-note-card">
+                      <div className="note-header">
+                        <span className="note-match">Match {entry.matchNumber || '?'}</span>
+                        <span className="note-event">{entry.eventKey || 'Unknown Event'}</span>
+                        <span className="note-scouter">by {entry.scouterName || 'Unknown'}</span>
+                      </div>
+                      <div className="note-content">{entry.notes}</div>
+                    </div>
+                  ))}
+                {filteredScoutingData.filter(entry => entry.notes && entry.notes.trim()).length === 0 && (
+                  <p className="no-notes">No notes recorded for this team yet.</p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* No Results Message (initial state) */}
+      {!loading && !error && !teamData && !tbaData && (
+        <div className="content-card">
+          <div className="placeholder-content">
+            <div className="icon">🔍</div>
+            <h3>Search for a Team</h3>
+            <p>Enter a team number above to view their stats</p>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+

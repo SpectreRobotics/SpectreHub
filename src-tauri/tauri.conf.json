@@ -1,11 +1,11 @@
 {
-  "productName": "Reflect",
+  "productName": "SpectreHub",
   "mainBinaryName": "reflect",
   "version": "2026.0.6",
-  "identifier": "com.2702rebels",
+  "identifier": "com.spectrerobotics.spectrehub",
   "build": {
-    "beforeDevCommand": "pnpm dev",
-    "beforeBuildCommand": "pnpm build",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420"
   },
@@ -31,7 +31,7 @@
     },
     "windows": [
       {
-        "title": "Reflect 2026.0.6",
+        "title": "SpectreHub 2026.0.6",
         "width": 1200,
         "height": 800,
         "resizable": true,
